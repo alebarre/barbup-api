@@ -3,10 +3,14 @@ import {
   AppointmentStatus,
   PaymentStatus,
   UserRole,
+  type Appointment,
   type PaymentMethod,
 } from "@prisma/client";
 
-import type { CreateAppointmentInput } from "../../appointments/schemas/appoitments.schemas";
+import type {
+  CreateAppointmentInput,
+  UpdateAppointmentStatusInput,
+} from "../../appointments/schemas/appoitments.schemas";
 
 const ACTIVE_APPOINTMENT_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.PENDING,
@@ -105,12 +109,7 @@ export class AppointmentService {
       startAt.getTime() + totalDurationMinutes * 60 * 1000,
     );
 
-    await this.ensureWithinAvailability(
-      barber.id,
-      barber.availabilities,
-      startAt,
-      endAt,
-    );
+    await this.ensureWithinAvailability(barber.availabilities, startAt, endAt);
     await this.ensureNotInTimeOff(barber.id, startAt, endAt);
     await this.ensureNoConflict(barber.id, startAt, endAt);
 
@@ -124,7 +123,7 @@ export class AppointmentService {
     });
 
     const created = await this.app.prisma.$transaction(async (tx) => {
-      const appointment = await tx.appointment.create({
+      return tx.appointment.create({
         data: {
           clientId: clientUser.clientProfile!.id,
           barberId: barber.id,
@@ -148,58 +147,306 @@ export class AppointmentService {
             })),
           },
         },
-        include: {
-          client: true,
-          barber: true,
-          services: {
-            include: {
-              service: true,
-            },
-          },
-        },
+        include: this.getAppointmentInclude(),
       });
-
-      return appointment;
     });
 
+    return this.toResponse(created);
+  }
+
+  async listForMe(userId: string) {
+    const user = await this.app.prisma.user.findUnique({
+      where: { id: userId },
+      include: {
+        clientProfile: true,
+        barberProfile: true,
+      },
+    });
+
+    if (!user) {
+      throw new Error("Usuário não encontrado.");
+    }
+
+    let appointments: any[] = [];
+
+    if (user.role === UserRole.CLIENT) {
+      if (!user.clientProfile) {
+        throw new Error("Cliente não encontrado.");
+      }
+
+      appointments = await this.app.prisma.appointment.findMany({
+        where: {
+          clientId: user.clientProfile.id,
+        },
+        include: this.getAppointmentInclude(),
+        orderBy: [{ startAt: "desc" }],
+      });
+    } else if (user.role === UserRole.BARBER) {
+      if (!user.barberProfile) {
+        throw new Error("Barbeiro não encontrado.");
+      }
+
+      appointments = await this.app.prisma.appointment.findMany({
+        where: {
+          barberId: user.barberProfile.id,
+        },
+        include: this.getAppointmentInclude(),
+        orderBy: [{ startAt: "desc" }],
+      });
+    } else {
+      appointments = await this.app.prisma.appointment.findMany({
+        include: this.getAppointmentInclude(),
+        orderBy: [{ startAt: "desc" }],
+      });
+    }
+
+    return appointments.map((appointment) => this.toResponse(appointment));
+  }
+
+  async getById(userId: string, appointmentId: string) {
+    const user = await this.getUserWithProfiles(userId);
+
+    const appointment = await this.app.prisma.appointment.findUnique({
+      where: { id: appointmentId },
+      include: this.getAppointmentInclude(),
+    });
+
+    if (!appointment) {
+      throw new Error("Agendamento não encontrado.");
+    }
+
+    this.ensureCanAccessAppointment(user, appointment);
+
+    return this.toResponse(appointment);
+  }
+
+  async cancel(userId: string, appointmentId: string) {
+    const user = await this.getUserWithProfiles(userId);
+
+    const appointment = await this.app.prisma.appointment.findUnique({
+      where: { id: appointmentId },
+      include: this.getAppointmentInclude(),
+    });
+
+    if (!appointment) {
+      throw new Error("Agendamento não encontrado.");
+    }
+
+    this.ensureCanCancelAppointment(user, appointment);
+    this.ensureCanTransitionToCancelled(appointment);
+
+    const updated = await this.app.prisma.appointment.update({
+      where: { id: appointmentId },
+      data: {
+        status: AppointmentStatus.CANCELLED,
+        paymentStatus:
+          appointment.paymentStatus === PaymentStatus.PAID
+            ? appointment.paymentStatus
+            : PaymentStatus.CANCELLED,
+      },
+      include: this.getAppointmentInclude(),
+    });
+
+    return this.toResponseCancel(updated);
+  }
+
+  async accept(userId: string, appointmentId: string) {
+    const user = await this.getUserWithProfiles(userId);
+
+    const appointment = await this.app.prisma.appointment.findUnique({
+      where: { id: appointmentId },
+      include: this.getAppointmentInclude(),
+    });
+
+    if (!appointment) {
+      throw new Error("Agendamento não encontrado.");
+    }
+
+    this.ensureCanAcceptAppointment(user, appointment);
+
+    if (appointment.status !== AppointmentStatus.PENDING) {
+      throw new Error("Apenas agendamentos pendentes podem ser aceitos.");
+    }
+
+    const updated = await this.app.prisma.appointment.update({
+      where: { id: appointmentId },
+      data: {
+        status: AppointmentStatus.ACCEPTED,
+      },
+      include: this.getAppointmentInclude(),
+    });
+
+    return this.toResponse(updated);
+  }
+
+  async updateStatus(
+    userId: string,
+    appointmentId: string,
+    input: UpdateAppointmentStatusInput,
+  ) {
+    const user = await this.getUserWithProfiles(userId);
+
+    const appointment = await this.app.prisma.appointment.findUnique({
+      where: { id: appointmentId },
+      include: this.getAppointmentInclude(),
+    });
+
+    if (!appointment) {
+      throw new Error("Agendamento não encontrado.");
+    }
+
+    this.ensureCanUpdateStatus(user, appointment);
+
+    const nextStatus = input.status as AppointmentStatus;
+    this.ensureValidManualStatusTransition(appointment.status, nextStatus);
+
+    const updated = await this.app.prisma.appointment.update({
+      where: { id: appointmentId },
+      data: {
+        status: nextStatus,
+      },
+      include: this.getAppointmentInclude(),
+    });
+
+    return this.toResponse(updated);
+  }
+
+  private async getUserWithProfiles(userId: string) {
+    const user = await this.app.prisma.user.findUnique({
+      where: { id: userId },
+      include: {
+        clientProfile: true,
+        barberProfile: true,
+      },
+    });
+
+    if (!user) {
+      throw new Error("Usuário não encontrado.");
+    }
+
+    return user;
+  }
+
+  private getAppointmentInclude() {
     return {
-      id: created.id,
-      client: {
-        id: created.client.id,
-        firstName: created.client.firstName,
-        lastName: created.client.lastName,
-        phone: created.client.phone,
+      client: true,
+      barber: true,
+      services: {
+        include: {
+          service: true,
+        },
       },
-      barber: {
-        id: created.barber.id,
-        displayName: created.barber.displayName,
-        photoUrl: created.barber.photoUrl,
-      },
-      startAt: created.startAt,
-      endAt: created.endAt,
-      status: created.status,
-      paymentMethod: created.paymentMethod,
-      paymentStatus: created.paymentStatus,
-      subtotalAmount: Number(created.subtotalAmount),
-      discountAmount: Number(created.discountAmount),
-      totalAmount: Number(created.totalAmount),
-      notes: created.notes,
-      whatsappMessage: created.whatsappMessage,
-      services: created.services.map((item) => ({
-        id: item.id,
-        serviceId: item.serviceId,
-        serviceName: item.serviceNameSnapshot,
-        unitPrice: Number(item.unitPriceSnapshot),
-        durationMinutes: item.durationMinutesSnapshot,
-        discountAmount: Number(item.discountAmountSnapshot),
-      })),
-      createdAt: created.createdAt,
-      updatedAt: created.updatedAt,
-    };
+    } as const;
+  }
+
+  private ensureCanAccessAppointment(user: any, appointment: any) {
+    if (user.role === UserRole.SUPER_ADMIN) return;
+
+    if (
+      user.role === UserRole.CLIENT &&
+      user.clientProfile &&
+      appointment.clientId === user.clientProfile.id
+    ) {
+      return;
+    }
+
+    if (
+      user.role === UserRole.BARBER &&
+      user.barberProfile &&
+      appointment.barberId === user.barberProfile.id
+    ) {
+      return;
+    }
+
+    throw new Error("Acesso negado a este agendamento.");
+  }
+
+  private ensureCanCancelAppointment(user: any, appointment: any) {
+    if (user.role === UserRole.SUPER_ADMIN) return;
+
+    if (
+      user.role === UserRole.CLIENT &&
+      user.clientProfile &&
+      appointment.clientId === user.clientProfile.id
+    ) {
+      return;
+    }
+
+    if (
+      user.role === UserRole.BARBER &&
+      user.barberProfile &&
+      appointment.barberId === user.barberProfile.id
+    ) {
+      return;
+    }
+
+    throw new Error("Você não pode cancelar este agendamento.");
+  }
+
+  private ensureCanAcceptAppointment(user: any, appointment: any) {
+    if (user.role === UserRole.SUPER_ADMIN) return;
+
+    if (
+      user.role === UserRole.BARBER &&
+      user.barberProfile &&
+      appointment.barberId === user.barberProfile.id
+    ) {
+      return;
+    }
+
+    throw new Error("Você não pode aceitar este agendamento.");
+  }
+
+  private ensureCanUpdateStatus(user: any, appointment: any) {
+    if (user.role === UserRole.SUPER_ADMIN) return;
+
+    if (
+      user.role === UserRole.BARBER &&
+      user.barberProfile &&
+      appointment.barberId === user.barberProfile.id
+    ) {
+      return;
+    }
+
+    throw new Error("Você não pode alterar o status deste agendamento.");
+  }
+
+  private ensureCanTransitionToCancelled(appointment: Appointment) {
+    if (appointment.status === AppointmentStatus.CANCELLED) {
+      throw new Error("Este agendamento já está cancelado.");
+    }
+
+    if (appointment.status === AppointmentStatus.COMPLETED) {
+      throw new Error("Não é possível cancelar um agendamento concluído.");
+    }
+
+    if (appointment.status === AppointmentStatus.NO_SHOW) {
+      throw new Error(
+        "Não é possível cancelar um agendamento marcado como no-show.",
+      );
+    }
+  }
+
+  private ensureValidManualStatusTransition(
+    currentStatus: AppointmentStatus,
+    nextStatus: AppointmentStatus,
+  ) {
+    if (currentStatus === nextStatus) {
+      throw new Error("O agendamento já está com esse status.");
+    }
+
+    if (
+      currentStatus === AppointmentStatus.CANCELLED ||
+      currentStatus === AppointmentStatus.COMPLETED ||
+      currentStatus === AppointmentStatus.NO_SHOW
+    ) {
+      throw new Error(
+        `Não é possível alterar o status final de um agendamento com status: ${currentStatus}.`,
+      );
+    }
   }
 
   private async ensureWithinAvailability(
-    barberId: string,
     availabilities: Array<{
       weekday: string;
       startTime: string;
@@ -209,6 +456,11 @@ export class AppointmentService {
     startAt: Date,
     endAt: Date,
   ) {
+    const hasCrossDay = startAt.toDateString() !== endAt.toDateString();
+    if (hasCrossDay) {
+      throw new Error("O agendamento não pode atravessar para o dia seguinte.");
+    }
+
     const weekday = WEEKDAYS[startAt.getDay()];
     const activeSlots = availabilities.filter(
       (item) => item.weekday === weekday && item.isActive,
@@ -232,25 +484,6 @@ export class AppointmentService {
       throw new Error(
         "O horário escolhido está fora da disponibilidade do barbeiro.",
       );
-    }
-
-    const hasCrossDay = startAt.toDateString() !== endAt.toDateString();
-    if (hasCrossDay) {
-      throw new Error("O agendamento não pode atravessar para o dia seguinte.");
-    }
-
-    const existsOverlappingTimeOffWindow =
-      await this.app.prisma.barberTimeOff.findFirst({
-        where: {
-          barberId,
-          startAt: { lte: startAt },
-          endAt: { gte: endAt },
-        },
-        select: { id: true },
-      });
-
-    if (existsOverlappingTimeOffWindow) {
-      throw new Error("O horário escolhido cai em um bloqueio do barbeiro.");
     }
   }
 
@@ -355,5 +588,73 @@ export class AppointmentService {
     }. Término previsto às ${this.formatTime(params.endAt)}. Serviços: ${params.serviceNames.join(
       ", ",
     )}. Forma de pagamento: ${this.formatPaymentMethod(params.paymentMethod)}.`;
+  }
+
+  private toResponse(appointment: any) {
+    return {
+      id: appointment.id,
+      client: {
+        id: appointment.client.id,
+        firstName: appointment.client.firstName,
+        lastName: appointment.client.lastName,
+        phone: appointment.client.phone,
+        photoUrl: appointment.client.photoUrl,
+      },
+      barber: {
+        id: appointment.barber.id,
+        displayName: appointment.barber.displayName,
+        photoUrl: appointment.barber.photoUrl,
+        bio: appointment.barber.bio,
+      },
+      startAt: appointment.startAt,
+      endAt: appointment.endAt,
+      status: appointment.status,
+      paymentMethod: appointment.paymentMethod,
+      paymentStatus: appointment.paymentStatus,
+      subtotalAmount: Number(appointment.subtotalAmount),
+      discountAmount: Number(appointment.discountAmount),
+      totalAmount: Number(appointment.totalAmount),
+      notes: appointment.notes,
+      whatsappMessage: appointment.whatsappMessage,
+      whatsappMessageSentAt: appointment.whatsappMessageSentAt,
+      services: appointment.services.map((item: any) => ({
+        id: item.id,
+        serviceId: item.serviceId,
+        serviceName: item.serviceNameSnapshot,
+        unitPrice: Number(item.unitPriceSnapshot),
+        durationMinutes: item.durationMinutesSnapshot,
+        discountAmount: Number(item.discountAmountSnapshot),
+      })),
+      createdAt: appointment.createdAt,
+      updatedAt: appointment.updatedAt,
+    };
+  }
+
+  private toResponseCancel(appointment: any) {
+    return {
+      id: appointment.id,
+      startAt: appointment.startAt,
+      endAt: appointment.endAt,
+      status: appointment.status,
+      client: {
+        id: appointment.client.id,
+        firstName: appointment.client.firstName,
+      },
+      barber: {
+        id: appointment.barber.id,
+        displayName: appointment.barber.displayName,
+      },
+
+      services: appointment.services.map((item: any) => ({
+        id: item.id,
+        serviceId: item.serviceId,
+        serviceName: item.serviceNameSnapshot,
+        unitPrice: Number(item.unitPriceSnapshot),
+        durationMinutes: item.durationMinutesSnapshot,
+        discountAmount: Number(item.discountAmountSnapshot),
+      })),
+      createdAt: appointment.createdAt,
+      updatedAt: appointment.updatedAt,
+    };
   }
 }

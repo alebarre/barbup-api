@@ -15,4 +15,22 @@ export const createAppointmentSchema = z.object({
     .nullable(),
 });
 
+export const appointmentIdParamSchema = z.object({
+  id: z.uuid("ID de agendamento inválido."),
+});
+
+export const updateAppointmentStatusSchema = z.object({
+  status: z.enum([
+    "PENDING",
+    "CONFIRMED",
+    "ACCEPTED",
+    "CANCELLED",
+    "COMPLETED",
+    "NO_SHOW",
+  ]),
+});
+
 export type CreateAppointmentInput = z.infer<typeof createAppointmentSchema>;
+export type UpdateAppointmentStatusInput = z.infer<
+  typeof updateAppointmentStatusSchema
+>;

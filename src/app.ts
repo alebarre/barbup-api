@@ -11,6 +11,10 @@ import { clientRoutes } from "./modules/clients/routes/client.routes";
 import { serviceRoutes } from "./modules/services/routes/service.routes";
 import { barberRoutes } from "./modules/barbers/routes/barber.routes";
 import { appointmentRoutes } from "./modules/appointments/routes/appointment.routes";
+import { homeRoutes } from "./modules/home/routes/home.routes";
+import { productRoutes } from "./modules/products/routes/product.routes";
+import { promotionRoutes } from "./modules/promotions/routes/promotion.routes";
+import { campaignRoutes } from "./modules/campaigns/routes/campaign.routes";
 
 export async function buildApp() {
   const app = Fastify({
@@ -35,25 +39,15 @@ export async function buildApp() {
     return { status: "UP" };
   });
 
-  await app.register(authRoutes, {
-    prefix: "/auth",
-  });
-
-  await app.register(clientRoutes, {
-    prefix: "/clients",
-  });
-
-  await app.register(serviceRoutes, {
-    prefix: "/services",
-  });
-
-  await app.register(barberRoutes, {
-    prefix: "/barbers",
-  });
-
-  await app.register(appointmentRoutes, {
-    prefix: "/appointments",
-  });
+  await app.register(authRoutes, { prefix: "/auth" });
+  await app.register(clientRoutes, { prefix: "/clients" });
+  await app.register(serviceRoutes, { prefix: "/services" });
+  await app.register(barberRoutes, { prefix: "/barbers" });
+  await app.register(appointmentRoutes, { prefix: "/appointments" });
+  await app.register(homeRoutes, { prefix: "/home" });
+  await app.register(productRoutes, { prefix: "/products" });
+  await app.register(promotionRoutes, { prefix: "/promotions" });
+  await app.register(campaignRoutes, { prefix: "/campaigns" });
 
   return app;
 }
