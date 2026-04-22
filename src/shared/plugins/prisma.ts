@@ -10,7 +10,7 @@ declare module "fastify" {
   }
 }
 
-export const prismaPlugin = fp(async (app: FastifyInstance) => {
+async function prismaPluginImpl(app: FastifyInstance) {
   const connectionString = process.env.DATABASE_URL;
 
   if (!connectionString) {
@@ -32,4 +32,8 @@ export const prismaPlugin = fp(async (app: FastifyInstance) => {
     await prisma.$disconnect();
     await pool.end();
   });
+}
+
+export const prismaPlugin = fp(prismaPluginImpl, {
+  name: "prisma-plugin",
 });

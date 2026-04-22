@@ -12,6 +12,8 @@ import type {
   UpdateAppointmentStatusInput,
 } from "../../appointments/schemas/appoitments.schemas";
 
+import { LoyaltyService } from "../../loyalty/services/loyalty.services";
+
 const ACTIVE_APPOINTMENT_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.PENDING,
   AppointmentStatus.CONFIRMED,
@@ -307,6 +309,11 @@ export class AppointmentService {
       },
       include: this.getAppointmentInclude(),
     });
+
+    if (nextStatus === AppointmentStatus.COMPLETED) {
+      const loyaltyService = new LoyaltyService(this.app);
+      await loyaltyService.awardPointsForCompletedAppointment(updated.id);
+    }
 
     return this.toResponse(updated);
   }

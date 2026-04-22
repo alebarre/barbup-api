@@ -2,7 +2,13 @@ import fp from "fastify-plugin";
 import jwt from "@fastify/jwt";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
-export const jwtPlugin = fp(async (app: FastifyInstance) => {
+declare module "fastify" {
+  interface FastifyInstance {
+    authenticate(request: FastifyRequest, reply: FastifyReply): Promise<void>;
+  }
+}
+
+async function jwtPluginImpl(app: FastifyInstance) {
   const secret = process.env.JWT_SECRET;
 
   if (!secret) {
@@ -28,10 +34,8 @@ export const jwtPlugin = fp(async (app: FastifyInstance) => {
       }
     },
   );
-});
-
-declare module "fastify" {
-  interface FastifyInstance {
-    authenticate(request: FastifyRequest, reply: FastifyReply): Promise<void>;
-  }
 }
+
+export const jwtPlugin = fp(jwtPluginImpl, {
+  name: "jwt-plugin",
+});
