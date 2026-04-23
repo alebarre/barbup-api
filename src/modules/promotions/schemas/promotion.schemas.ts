@@ -23,8 +23,10 @@ export const createPromotionSchema = z
       .number()
       .positive("Valor deve ser maior que zero.")
       .max(999999.99, "Valor inválido."),
-    startAt: z.string().datetime("Data/hora inicial inválida."),
-    endAt: z.string().datetime("Data/hora final inválida."),
+    startAt: z
+      .string()
+      .datetime({ offset: true, message: "Data/hora inicial inválida." }),
+    endAt: z.string().datetime({ offset: true, message: "Data/hora final inválida." }),
     isActive: z.boolean().optional(),
   })
   .superRefine((value, ctx) => {
@@ -66,8 +68,13 @@ export const updatePromotionSchema = z
       .positive("Valor deve ser maior que zero.")
       .max(999999.99, "Valor inválido.")
       .optional(),
-    startAt: z.string().datetime("Data/hora inicial inválida.").optional(),
-    endAt: z.string().datetime("Data/hora final inválida.").optional(),
+    startAt: z
+      .string()
+      .datetime({ offset: true, message: "Data/hora inicial inválida." }),
+    endAt: z
+      .string()
+      .datetime({ offset: true, message: "Data/hora final inválida." })
+      .optional(),
     isActive: z.boolean().optional(),
   })
   .superRefine((value, ctx) => {

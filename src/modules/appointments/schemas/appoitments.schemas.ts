@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const createAppointmentSchema = z.object({
   barberId: z.uuid("Barbeiro inválido."),
-  startAt: z.string().datetime("Data/hora inicial inválida."),
+  startAt: z.string().datetime({ offset: true, message: 'Data/hora inicial inválida.' }),
   serviceIds: z
     .array(z.uuid("Serviço inválido."))
     .min(1, "Selecione pelo menos um serviço."),

@@ -9,6 +9,7 @@ export async function promotionRoutes(app: FastifyInstance) {
   const promotionService = new PromotionService(app);
   const promotionController = new PromotionController(promotionService);
 
+  app.get("/", promotionController.list);
   app.get("/active", promotionController.listActive);
 
   app.post(

@@ -9,14 +9,20 @@ import type {
 export class PromotionService {
   constructor(private readonly app: FastifyInstance) {}
 
+  async list() {
+    const promotions = await this.app.prisma.promotion.findMany({
+      orderBy: [{ isActive: "desc" }, { startAt: "asc" }, { title: "asc" }],
+    });
+
+    return promotions.map((promotion) => this.toResponse(promotion));
+  }
+
   async listActive() {
     const now = new Date();
 
     const promotions = await this.app.prisma.promotion.findMany({
       where: {
         isActive: true,
-        startAt: { lte: now },
-        endAt: { gte: now },
       },
       orderBy: [{ startAt: "asc" }, { title: "asc" }],
     });

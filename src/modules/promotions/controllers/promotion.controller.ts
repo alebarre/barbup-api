@@ -11,6 +11,11 @@ import {
 export class PromotionController {
   constructor(private readonly promotionService: PromotionService) {}
 
+  list = async (_request: FastifyRequest, reply: FastifyReply) => {
+    const result = await this.promotionService.list();
+    return reply.status(200).send(result);
+  };
+
   listActive = async (_request: FastifyRequest, reply: FastifyReply) => {
     const result = await this.promotionService.listActive();
     return reply.status(200).send(result);

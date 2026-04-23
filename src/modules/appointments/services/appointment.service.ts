@@ -14,6 +14,8 @@ import type {
 
 import { LoyaltyService } from "../../loyalty/services/loyalty.services";
 
+import { getWeekdayLabelPtBr } from "../../../shared/utils/weekday-label";
+
 const ACTIVE_APPOINTMENT_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.PENDING,
   AppointmentStatus.CONFIRMED,
@@ -104,11 +106,36 @@ export class AppointmentService {
       0,
     );
 
-    const discountAmount = 0;
-    const totalAmount = subtotal - discountAmount;
-
     const endAt = new Date(
       startAt.getTime() + totalDurationMinutes * 60 * 1000,
+    );
+
+    const { discountAmount: promotionDiscountAmount, appliedPromotion } =
+      await this.calculatePromotionDiscount({
+        subtotal,
+        startAt,
+        endAt,
+      });
+
+    const { discountAmount: membershipDiscountAmount, appliedMembership } =
+      await this.calculateMembershipDiscount({
+        clientId: clientUser.clientProfile.id,
+        subtotal,
+      });
+
+    const {
+      discountAmount,
+      appliedPromotion: finalAppliedPromotion,
+      appliedMembership: finalAppliedMembership,
+    } = this.resolveBestDiscount({
+      promotionDiscountAmount,
+      appliedPromotion,
+      membershipDiscountAmount,
+      appliedMembership,
+    });
+
+    const totalAmount = Number(
+      Math.max(subtotal - discountAmount, 0).toFixed(2),
     );
 
     await this.ensureWithinAvailability(barber.availabilities, startAt, endAt);
@@ -122,10 +149,13 @@ export class AppointmentService {
       endAt,
       paymentMethod: input.paymentMethod,
       serviceNames: services.map((service) => service.name),
+      appliedPromotion: finalAppliedPromotion,
+      appliedMembership: finalAppliedMembership,
+      discountAmount,
     });
 
     const created = await this.app.prisma.$transaction(async (tx) => {
-      return tx.appointment.create({
+      const appointment = await tx.appointment.create({
         data: {
           clientId: clientUser.clientProfile!.id,
           barberId: barber.id,
@@ -137,23 +167,44 @@ export class AppointmentService {
           subtotalAmount: subtotal,
           discountAmount,
           totalAmount,
-          notes: input.notes ?? null,
+          notes: this.buildDiscountNote({
+            existingNotes: input.notes ?? null,
+            appliedPromotion: finalAppliedPromotion,
+            appliedMembership: finalAppliedMembership,
+          }),
           whatsappMessage,
+        },
+      });
+
+      await tx.appointmentService.createMany({
+        data: services.map((service) => ({
+          appointmentId: appointment.id,
+          serviceId: service.id,
+          serviceNameSnapshot: service.name,
+          unitPriceSnapshot: service.price,
+          durationMinutesSnapshot: service.durationMinutes,
+          discountAmountSnapshot: 0,
+        })),
+      });
+
+      return tx.appointment.findUniqueOrThrow({
+        where: { id: appointment.id },
+        include: {
+          client: true,
+          barber: true,
           services: {
-            create: services.map((service) => ({
-              serviceId: service.id,
-              serviceNameSnapshot: service.name,
-              unitPriceSnapshot: service.price,
-              durationMinutesSnapshot: service.durationMinutes,
-              discountAmountSnapshot: 0,
-            })),
+            include: {
+              service: true,
+            },
           },
         },
-        include: this.getAppointmentInclude(),
       });
     });
 
-    return this.toResponse(created);
+    return this.toResponse(created, {
+      appliedPromotion: finalAppliedPromotion,
+      appliedMembership: finalAppliedMembership,
+    });
   }
 
   async listForMe(userId: string) {
@@ -587,17 +638,72 @@ export class AppointmentService {
     endAt: Date;
     paymentMethod: PaymentMethod | string;
     serviceNames: string[];
+    appliedPromotion?: null | {
+      source: "PROMOTION" | "DISCOUNT_SCHEDULE";
+      id: string;
+      title: string;
+      type: string;
+      value: number;
+    };
+    appliedMembership?: null | {
+      id: string;
+      name: string;
+      monthlyPrice: number;
+      benefitType: "PERCENTAGE";
+      benefitValue: number;
+    };
+    discountAmount?: number;
   }) {
+    const formattedDiscount = Number(params.discountAmount ?? 0).toLocaleString(
+      "pt-BR",
+      {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      },
+    );
+
+    let benefitText = "";
+
+    if (params.appliedPromotion) {
+      benefitText =
+        params.appliedPromotion.type === "PERCENTAGE" ||
+        params.appliedPromotion.type === "TIME_WINDOW"
+          ? ` Promoção aplicada: ${params.appliedPromotion.title} (${params.appliedPromotion.value}% OFF, desconto de R$ ${formattedDiscount}).`
+          : ` Promoção aplicada: ${params.appliedPromotion.title} (desconto de R$ ${formattedDiscount}).`;
+    }
+
+    if (params.appliedMembership) {
+      benefitText = ` Benefício de assinatura aplicado: ${params.appliedMembership.name} (${params.appliedMembership.benefitValue}% OFF, desconto de R$ ${formattedDiscount}).`;
+    }
+
     return `Olá, ${params.clientName}. Seu agendamento na BarbUP foi confirmado para ${this.formatDate(
       params.startAt,
     )} às ${this.formatTime(params.startAt)} com o barbeiro ${
       params.barberName
     }. Término previsto às ${this.formatTime(params.endAt)}. Serviços: ${params.serviceNames.join(
       ", ",
-    )}. Forma de pagamento: ${this.formatPaymentMethod(params.paymentMethod)}.`;
+    )}. Forma de pagamento: ${this.formatPaymentMethod(params.paymentMethod)}.${benefitText}`;
   }
 
-  private toResponse(appointment: any) {
+  private toResponse(
+    appointment: any,
+    calculated?: {
+      appliedPromotion?: null | {
+        source: "PROMOTION" | "DISCOUNT_SCHEDULE";
+        id: string;
+        title: string;
+        type: string;
+        value: number;
+      };
+      appliedMembership?: null | {
+        id: string;
+        name: string;
+        monthlyPrice: number;
+        benefitType: "PERCENTAGE";
+        benefitValue: number;
+      };
+    },
+  ) {
     return {
       id: appointment.id,
       client: {
@@ -621,6 +727,8 @@ export class AppointmentService {
       subtotalAmount: Number(appointment.subtotalAmount),
       discountAmount: Number(appointment.discountAmount),
       totalAmount: Number(appointment.totalAmount),
+      appliedPromotion: calculated?.appliedPromotion ?? null,
+      appliedMembership: calculated?.appliedMembership ?? null,
       notes: appointment.notes,
       whatsappMessage: appointment.whatsappMessage,
       whatsappMessageSentAt: appointment.whatsappMessageSentAt,
@@ -662,6 +770,311 @@ export class AppointmentService {
       })),
       createdAt: appointment.createdAt,
       updatedAt: appointment.updatedAt,
+    };
+  }
+
+  private async calculatePromotionDiscount(params: {
+    subtotal: number;
+    startAt: Date;
+    endAt: Date;
+  }) {
+    const { subtotal, startAt, endAt } = params;
+    const now = new Date();
+
+    const [promotions, discountSchedules] = await Promise.all([
+      this.app.prisma.promotion.findMany({
+        where: {
+          isActive: true,
+          startAt: { lte: now },
+          endAt: { gte: now },
+          type: {
+            in: ["PERCENTAGE", "FIXED_AMOUNT", "TIME_WINDOW"],
+          },
+        },
+        orderBy: [{ createdAt: "asc" }],
+      }),
+      this.app.prisma.discountSchedule.findMany({
+        where: {
+          isActive: true,
+        },
+        orderBy: [{ createdAt: "asc" }],
+      }),
+    ]);
+
+    let bestDiscount = 0;
+
+    let appliedPromotion: null | {
+      source: "PROMOTION" | "DISCOUNT_SCHEDULE";
+      id: string;
+      title: string;
+      type: string;
+      value: number;
+    } = null;
+
+    for (const promotion of promotions) {
+      let currentDiscount = 0;
+
+      if (promotion.type === "PERCENTAGE") {
+        currentDiscount = subtotal * (Number(promotion.value) / 100);
+      }
+
+      if (promotion.type === "FIXED_AMOUNT") {
+        currentDiscount = Number(promotion.value);
+      }
+
+      if (promotion.type === "TIME_WINDOW") {
+        const fitsWindow = this.isWithinPromotionTimeWindow(startAt, endAt);
+
+        if (!fitsWindow) {
+          continue;
+        }
+
+        currentDiscount = subtotal * (Number(promotion.value) / 100);
+      }
+
+      currentDiscount = Math.min(currentDiscount, subtotal);
+
+      if (currentDiscount > bestDiscount) {
+        bestDiscount = currentDiscount;
+        appliedPromotion = {
+          source: "PROMOTION",
+          id: promotion.id,
+          title: promotion.title,
+          type: promotion.type,
+          value: Number(promotion.value),
+        };
+      }
+    }
+
+    const weekday = this.getWeekdayEnum(startAt);
+    const startMinutes = this.toMinutes(startAt);
+    const endMinutes = this.toMinutes(endAt);
+
+    for (const schedule of discountSchedules) {
+      if (schedule.weekday !== weekday) {
+        continue;
+      }
+
+      const scheduleStart = this.parseTimeToMinutes(schedule.startTime);
+      const scheduleEnd = this.parseTimeToMinutes(schedule.endTime);
+
+      const fitsSchedule =
+        startMinutes >= scheduleStart && endMinutes <= scheduleEnd;
+
+      if (!fitsSchedule) {
+        continue;
+      }
+
+      let currentDiscount = 0;
+
+      if (schedule.discountType === "PERCENTAGE") {
+        currentDiscount = subtotal * (Number(schedule.discountValue) / 100);
+      }
+
+      if (schedule.discountType === "FIXED_AMOUNT") {
+        currentDiscount = Number(schedule.discountValue);
+      }
+
+      currentDiscount = Math.min(currentDiscount, subtotal);
+
+      if (currentDiscount > bestDiscount) {
+        bestDiscount = currentDiscount;
+        appliedPromotion = {
+          source: "DISCOUNT_SCHEDULE",
+          id: schedule.id,
+          title: `Desconto de horário - ${getWeekdayLabelPtBr(weekday)}`,
+          type: schedule.discountType,
+          value: Number(schedule.discountValue),
+        };
+      }
+    }
+
+    return {
+      discountAmount: Number(bestDiscount.toFixed(2)),
+      appliedPromotion,
+    };
+  }
+
+  private buildDiscountNote(params: {
+    existingNotes: string | null | undefined;
+    appliedPromotion: null | {
+      source: "PROMOTION" | "DISCOUNT_SCHEDULE";
+      id: string;
+      title: string;
+      type: string;
+      value: number;
+    };
+    appliedMembership: null | {
+      id: string;
+      name: string;
+      monthlyPrice: number;
+      benefitType: "PERCENTAGE";
+      benefitValue: number;
+    };
+  }) {
+    const notes: string[] = [];
+
+    if (params.existingNotes?.trim()) {
+      notes.push(params.existingNotes.trim());
+    }
+
+    if (params.appliedPromotion) {
+      const label =
+        params.appliedPromotion.source === "DISCOUNT_SCHEDULE"
+          ? "Desconto de horário aplicado"
+          : "Promoção aplicada";
+
+      const promotionText =
+        params.appliedPromotion.type === "PERCENTAGE" ||
+        params.appliedPromotion.type === "TIME_WINDOW"
+          ? `${label}: ${params.appliedPromotion.title} (${params.appliedPromotion.value}% OFF).`
+          : `${label}: ${params.appliedPromotion.title} (R$ ${params.appliedPromotion.value.toFixed(2)} OFF).`;
+
+      notes.push(promotionText);
+    }
+
+    if (params.appliedMembership) {
+      notes.push(
+        `Benefício de assinatura aplicado: ${params.appliedMembership.name} (${params.appliedMembership.benefitValue}% OFF).`,
+      );
+    }
+
+    return notes.length > 0 ? notes.join("\n") : null;
+  }
+
+  private buildPromotionNote(
+    existingNotes: string | null | undefined,
+    appliedPromotion: null | {
+      id: string;
+      title: string;
+      type: string;
+      value: number;
+    },
+  ) {
+    if (!appliedPromotion) {
+      return existingNotes ?? null;
+    }
+
+    const promotionText =
+      appliedPromotion.type === "PERCENTAGE"
+        ? `Promoção aplicada: ${appliedPromotion.title} (${appliedPromotion.value}% OFF).`
+        : `Promoção aplicada: ${appliedPromotion.title} (R$ ${appliedPromotion.value.toFixed(2)} OFF).`;
+
+    if (!existingNotes || existingNotes.trim().length === 0) {
+      return promotionText;
+    }
+
+    return `${existingNotes}\n${promotionText}`;
+  }
+
+  private isWithinPromotionTimeWindow(startAt: Date, endAt: Date) {
+    const startMinutes = this.toMinutes(startAt);
+    const endMinutes = this.toMinutes(endAt);
+
+    const windowStart = 9 * 60;
+    const windowEnd = 17 * 60;
+
+    return startMinutes >= windowStart && endMinutes <= windowEnd;
+  }
+
+  private getWeekdayEnum(date: Date) {
+    const weekdays = [
+      "SUNDAY",
+      "MONDAY",
+      "TUESDAY",
+      "WEDNESDAY",
+      "THURSDAY",
+      "FRIDAY",
+      "SATURDAY",
+    ] as const;
+
+    return weekdays[date.getDay()];
+  }
+
+  private async calculateMembershipDiscount(params: {
+    clientId: string;
+    subtotal: number;
+  }) {
+    const activeMembership = await this.app.prisma.clientMembership.findFirst({
+      where: {
+        clientId: params.clientId,
+        isActive: true,
+      },
+      include: {
+        membershipPlan: true,
+      },
+      orderBy: [{ startDate: "desc" }],
+    });
+
+    if (!activeMembership) {
+      return {
+        discountAmount: 0,
+        appliedMembership: null as null | {
+          id: string;
+          name: string;
+          monthlyPrice: number;
+          benefitType: "PERCENTAGE";
+          benefitValue: number;
+        },
+      };
+    }
+
+    const benefitValue = 10;
+    const discountAmount = Number(
+      Math.min(params.subtotal * (benefitValue / 100), params.subtotal).toFixed(
+        2,
+      ),
+    );
+
+    return {
+      discountAmount,
+      appliedMembership: {
+        id: activeMembership.membershipPlan.id,
+        name: activeMembership.membershipPlan.name,
+        monthlyPrice: Number(activeMembership.membershipPlan.monthlyPrice),
+        benefitType: "PERCENTAGE" as const,
+        benefitValue,
+      },
+    };
+  }
+
+  private resolveBestDiscount(params: {
+    promotionDiscountAmount: number;
+    appliedPromotion: null | {
+      source: "PROMOTION" | "DISCOUNT_SCHEDULE";
+      id: string;
+      title: string;
+      type: string;
+      value: number;
+    };
+    membershipDiscountAmount: number;
+    appliedMembership: null | {
+      id: string;
+      name: string;
+      monthlyPrice: number;
+      benefitType: "PERCENTAGE";
+      benefitValue: number;
+    };
+  }) {
+    const {
+      promotionDiscountAmount,
+      appliedPromotion,
+      membershipDiscountAmount,
+      appliedMembership,
+    } = params;
+
+    if (membershipDiscountAmount > promotionDiscountAmount) {
+      return {
+        discountAmount: membershipDiscountAmount,
+        appliedPromotion: null,
+        appliedMembership,
+      };
+    }
+
+    return {
+      discountAmount: promotionDiscountAmount,
+      appliedPromotion,
+      appliedMembership: null,
     };
   }
 }

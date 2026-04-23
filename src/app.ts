@@ -17,6 +17,8 @@ import { promotionRoutes } from "./modules/promotions/routes/promotion.routes";
 import { campaignRoutes } from "./modules/campaigns/routes/campaign.routes";
 import { membershipRoutes } from "./modules/memberships/routes/membership.routes";
 import { loyaltyRoutes } from "./modules/loyalty/routes/loyalty.routes";
+import { discountScheduleRoutes } from "./modules/discount-schedules/routes/discount-schedule.routes";
+
 
 export async function buildApp() {
   const app = Fastify({
@@ -52,6 +54,7 @@ export async function buildApp() {
   await app.register(campaignRoutes, { prefix: "/campaigns" });
   await app.register(membershipRoutes, { prefix: "/memberships" });
   await app.register(loyaltyRoutes, { prefix: "/loyalty" });
+  await app.register(discountScheduleRoutes, { prefix: "/discount-schedules" });
 
   return app;
 }
